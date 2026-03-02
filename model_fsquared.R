@@ -20,10 +20,13 @@
 library(TAF)
 library(mse)
 library(msemodules)
+library(FLBRP)
 library(FLasher)
 library(FLSRTMB)  # to estimate SR parameters and add estimation uncertainty
 
 source("utilities_fsquared.R")
+
+mkdir("model")
 
 # LOAD stock assessment results, 'run' is output FLStock
 # if you have your own assessment load it, for simplicity rename the output
@@ -41,38 +44,32 @@ stkname <- name(run)
 srmodels <- c("segreg") # segreg, bevholt, ricker
 # Initial year of projections
 iy <- dims(run)$maxyear
-# Years to be used to compute SPR0 for stock-recruitment model
-spryrs <- seq(dims(run)$minyear, iy)
-# Data lag
-dl <- 2
-# Management lag
-ml <- 1 
-# Assessment frequency
-af <- 1
+# Years to be used to compute SPR0 for stock-recruitment model, last 5
+spryrs <- seq(iy - 5, iy)
 # Data year
-dy <- iy - dl
+dy <- iy - 1
 # Final year
 fy <- iy + 50
-# Years to compute probability metrics
+# Probability years
 pys <- seq(fy - 5, fy)
 # How many years from the past to condition the future
 conditioning_ny <- 5
 # CV for SSB to add uncertainty in the shortcut estimator
-bcv_sa <- 0.5
+bcv_sa <- 0.1
 # CV for F to add uncertainty in the shortcut estimator
-fcv_sa <- 0.5
+fcv_sa <- 0.1
 # Years for geometric mean in short term forecast
 recyrs_mp <- -2
 # TODO: Blim and Btrigger
-Blim <- 788
-Btrigger <- 1095
+Blim <- 34788
+Btrigger <- 48340
 refpts <- FLPar(c(Blim = Blim, Btrigger = Btrigger))
 # TODO: no. of cores to use in parallel, defauls to 2/3 of those in machine
 cores <- round(availableCores() * 0.6)
 # TODO: F search grid
-fg_mp <- seq(0, 1.5, length=cores*10)
-# Number of iterations (minimum of 25 for testing, 500 for final)
-it <- max(25, cores * 50)
+fg_mp <- seq(0, 1.5, length=cores)
+# Number of iterations
+it <- 500
 # Random seed
 set.seed(987)
 
@@ -96,7 +93,7 @@ options(doFuture.rng.onMisuse="ignore")
 
 # BOOTSTRAP and SELECT model by largest logLik
 srpars <- bootstrapSR(run, iters=it, spr0=mean(spr0y(run)[, ac(spryrs)]),
-  models=srmodels, verbose=FALSE)
+  models=srmodels)
 
 # GENERATE future deviances: lognormal autocorrelated
 srdevs <- rlnormar1(sdlog=srpars$sigmaR, rho=srpars$rho, years=seq(dy, fy),
@@ -106,7 +103,7 @@ srdevs <- rlnormar1(sdlog=srpars$sigmaR, rho=srpars$rho, years=seq(dy, fy),
 om <- FLom(stock=propagate(run, it), refpts=refpts, model="segreg",
   params=srpars, deviances=srdevs, name=stkname)
 
-# TODO: SETUP om future: average of most recent years set by conditioning_ny
+# SETUP om future: average of most recent years set by conditioning_ny
 om <- fwdWindow(om, end=fy, nsq=conditioning_ny)
 
 #===============================================================================
@@ -121,21 +118,6 @@ f0 <- fwd(om, control=fwdControl(quant='fbar', value=0, year=seq(iy + 1, fy)))
 # coherent with the stock-recruitment model and parameters 
 performance(f0, statistics=icestats["PBlim"])[year %in% seq(iy, fy, by=5),
   .(PBlim=mean(data)), by=year]
-
-# TEST Recruitment predictions
-# If SSB is projected to the level of the historical period used to estimate
-# the S/R parameters, recruitment should be similar to recruitment during the
-# same period
-ssbhistorical <- fwd(om, control=fwdControl(quant='ssb_nextyear', value=mean(ssb(om)[,ac(spryrs)]), year=seq(iy + 1, fy-1)))
-
-rdf0 <- rec(ssbhistorical)[,ac(fy-1)]
-rh <- iterMedians(rec(ssbhistorical)[,ac(spryrs)])
-
-ggplot(rdf0, aes(x = log(data))) +
-  geom_density(alpha = 0.4) +
-  theme_minimal() +
-  labs(title = "Overlayed Histograms", x = "Value", fill = "Category") +
-  geom_vline(data = as.data.frame(rh), aes(xintercept = log(data)), linetype = "dashed", size = 1)
 
 # COMPUTE Inter-annual variability of biomass
 # to check when biomass stabilizes and set number of years for projections
@@ -152,7 +134,7 @@ plot(dt0, type="l", main="Inter-annual changes in biomass")
 #===============================================================================
 
 # SET intermediate year + start of runs, lags and frequency
-mseargs <- list(iy=iy, fy=fy, data_lag=dl, management_lag=ml, frq=af)
+mseargs <- list(iy=iy, fy=fy, data_lag=1, management_lag=1, frq=1) #link to setup
 
 # SET shortcut estimator uncertainty: F and SSB deviances and auto-correlation
 # Note your SSB deviances and auto-correlation have very little impact on the P(SB<Blim)
@@ -167,7 +149,7 @@ arule <- mpCtrl(
 
   # hcr: hockeystick (fbar ~ ssb | lim, trigger, target, min)
   hcr = mseCtrl(method=hockeystick.hcr,
-    args=list(lim=0, trigger=refpts(om)$Btrigger, target=0.22, min=0,
+    args=list(lim=0, trigger=0, target=NA, min=0,
     metric="ssb", output="fbar")),
 
   # (i)mplementation (sys)tem: tac.is (C ~ F)
@@ -193,9 +175,23 @@ performance(fgrid) <- performance(fgrid, statistics=icestats["PBlim"], year=pys,
 # fgrid <- mps(om, ctrl=arule, args=mseargs, hcr=list(target=fg_mp),
 #   names=paste("F" fg_mp), statistics=icestats, type="arule")
 
+# COMPUTE standard FMSY
+rps <- brp(FLBRP(stock(om), sr=sr(om)))
+
+# FIND FMSY with shortcut error, use FLBRP FMSY as starting point
+tune0 <- tunebisect(om, control=arule, args=mseargs,
+  tune=list(target=round(mean(fmsy(rps)), 3) * c(0.50, 1.50)),
+  statistic=icestats["PBlim"], prob=0.05, tol=0.005, years=pys)
+
+# CHECK Fmsy value
+args(control(tune0, "hcr"))$target
+
+# SET Btrigger
+args(arule$hcr)$trigger <- refpts(om)$Btrigger
+
 # FIND Ftarget that gives mean P(B < Blim) = 5%
 tune <- tunebisect(om, control=arule, args=mseargs,
-  tune=list(target=0.3 * c(0.5, 1.5)),
+  tune=list(target=args(control(tune0)$hcr)$target * c(0.90, 1.10)),
   statistic=icestats["PBlim"], prob=0.05, tol=0.005, years=pys)
 
 # PLOT
@@ -208,5 +204,5 @@ performance(tune) <- performance(tune, statistics=icestats, type="arule", run="t
 args(control(tune, "hcr"))$target
 
 # SAVE
-save("fgrid", "om", "tune", file="model/fsquared.rda")
+save("fgrid", "om", "tune", "tune0", file="model/fsquared.rda")
 
