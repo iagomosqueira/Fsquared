@@ -20,6 +20,7 @@
 library(TAF)
 library(mse)
 library(msemodules)
+library(FLBRP)
 library(FLasher)
 library(FLSRTMB)  # to estimate SR parameters and add estimation uncertainty
 
@@ -60,16 +61,15 @@ fcv_sa <- 0.1
 # Years for geometric mean in short term forecast
 recyrs_mp <- -2
 # TODO: Blim and Btrigger
-Blim <- 788
-Btrigger <- 1095
+Blim <- 34788
+Btrigger <- 48340
 refpts <- FLPar(c(Blim = Blim, Btrigger = Btrigger))
 # TODO: no. of cores to use in parallel, defauls to 2/3 of those in machine
 cores <- round(availableCores() * 0.6)
 # TODO: F search grid
 fg_mp <- seq(0, 1.5, length=cores)
-# Number of iterations (minimum of 50 for testing, 500 for final)
-it <- 25
-# it <- max(25, cores * 25)
+# Number of iterations
+it <- 500
 # Random seed
 set.seed(987)
 
@@ -100,10 +100,10 @@ srdevs <- rlnormar1(sdlog=srpars$sigmaR, rho=srpars$rho, years=seq(dy, fy),
   bias.correct=FALSE)
 
 # BUILD FLom, OM FLR object
-om <- FLom(stock=propagate(run, it), refpts=refpts, model="segreg",
+om <- FLom(stock=propagate(run, it), refpts=refpts, model="mixedsrr",
   params=srpars, deviances=srdevs, name=stkname)
 
-# TODO: SETUP om future: average of most recent years set by conditioning_ny
+# SETUP om future: average of most recent years set by conditioning_ny
 om <- fwdWindow(om, end=fy, nsq=conditioning_ny)
 
 #===============================================================================
@@ -149,7 +149,7 @@ arule <- mpCtrl(
 
   # hcr: hockeystick (fbar ~ ssb | lim, trigger, target, min)
   hcr = mseCtrl(method=hockeystick.hcr,
-    args=list(lim=0, trigger=refpts(om)$Btrigger, target=0.22, min=0,
+    args=list(lim=0, trigger=0, target=NA, min=0,
     metric="ssb", output="fbar")),
 
   # (i)mplementation (sys)tem: tac.is (C ~ F)
@@ -175,9 +175,23 @@ performance(fgrid) <- performance(fgrid, statistics=icestats["PBlim"], year=pys,
 # fgrid <- mps(om, ctrl=arule, args=mseargs, hcr=list(target=fg_mp),
 #   names=paste("F" fg_mp), statistics=icestats, type="arule")
 
+# GET Ftarget search starty from FMSY(run, segreg)
+rps <- brp(FLBRP(run, sr=fmle(as.FLSR(run, model="segreg"))))
+
+# FIND FMSY with shortcut error, use FLBRP FMSY as starting point
+tune0 <- tunebisect(om, control=arule, args=mseargs,
+  tune=list(target=round(mean(fmsy(rps)), 3) * c(0.50, 1.50)),
+  statistic=icestats["PBlim"], prob=0.05, tol=0.005, years=pys)
+
+# CHECK Fmsy value
+args(control(tune0, "hcr"))$target
+
+# SET Btrigger
+args(arule$hcr)$trigger <- refpts(om)$Btrigger
+
 # FIND Ftarget that gives mean P(B < Blim) = 5%
 tune <- tunebisect(om, control=arule, args=mseargs,
-  tune=list(target=0.3 * c(0.5, 1.5)),
+  tune=list(target=args(control(tune0)$hcr)$target * c(0.90, 1.10)),
   statistic=icestats["PBlim"], prob=0.05, tol=0.005, years=pys)
 
 # PLOT
@@ -190,5 +204,5 @@ performance(tune) <- performance(tune, statistics=icestats, type="arule", run="t
 args(control(tune, "hcr"))$target
 
 # SAVE
-save("fgrid", "om", "tune", file="model/fsquared.rda")
+save("fgrid", "om", "tune", "tune0", file="model/fsquared.rda")
 
