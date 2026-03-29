@@ -100,7 +100,7 @@ srdevs <- rlnormar1(sdlog=srpars$sigmaR, rho=srpars$rho, years=seq(dy, fy),
   bias.correct=FALSE)
 
 # BUILD FLom, OM FLR object
-om <- FLom(stock=propagate(run, it), refpts=refpts, model="segreg",
+om <- FLom(stock=propagate(run, it), refpts=refpts, model="mixedsrr",
   params=srpars, deviances=srdevs, name=stkname)
 
 # SETUP om future: average of most recent years set by conditioning_ny
@@ -175,8 +175,8 @@ performance(fgrid) <- performance(fgrid, statistics=icestats["PBlim"], year=pys,
 # fgrid <- mps(om, ctrl=arule, args=mseargs, hcr=list(target=fg_mp),
 #   names=paste("F" fg_mp), statistics=icestats, type="arule")
 
-# COMPUTE standard FMSY
-rps <- brp(FLBRP(stock(om), sr=sr(om)))
+# GET Ftarget search start from FMSY(run, segreg)
+rps <- brp(FLBRP(run, sr=fmle(as.FLSR(run, model="segreg"))))
 
 # FIND FMSY with shortcut error, use FLBRP FMSY as starting point
 tune0 <- tunebisect(om, control=arule, args=mseargs,
@@ -203,6 +203,10 @@ performance(tune) <- performance(tune, statistics=icestats, type="arule", run="t
 # CHECK Ftarget value
 args(control(tune, "hcr"))$target
 
+# STORE arule pars
+hcrargs <- FLPar(FMSY=args(control(tune0, "hcr"))$target,
+  Ftarget=args(control(tune, "hcr"))$target)
+
 # SAVE
-save("fgrid", "om", "tune", "tune0", file="model/fsquared.rda")
+save(om, fgrid, tune0, tune, hcrargs, file="model/fsquared.rda")
 
